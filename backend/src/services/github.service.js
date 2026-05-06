@@ -9,16 +9,23 @@
  */
 
 import axios from "axios";
+import dotenv from "dotenv";
+dotenv.config();
 
-// Base GitHub API client — all requests share these headers
+// Base GitHub API client
 const github = axios.create({
   baseURL: "https://api.github.com",
   headers: {
-    Authorization: `Bearer ${process.env.GITHUB_ACCESS_TOKEN}`,
     Accept: "application/vnd.github+json",
     "X-GitHub-Api-Version": "2022-11-28",
   },
   timeout: 10_000,
+});
+
+// Inject token per-request so it's always read fresh from env
+github.interceptors.request.use((config) => {
+  config.headers.Authorization = `Bearer ${process.env.GITHUB_ACCESS_TOKEN}`;
+  return config;
 });
 
 /**
@@ -48,12 +55,10 @@ export async function getRecentDeploys(
       throw new Error("GITHUB_ACCESS_TOKEN is not set in environment");
     }
 
-    // Calculate the window start — commits before this are ignored
     const windowStart = new Date(
       errorTimestamp.getTime() - windowMinutes * 60 * 1000
     );
 
-    // Fetch commits up to the error timestamp (not after — future commits can't cause past errors)
     const response = await github.get(`/repos/${repo}/commits`, {
       params: {
         until: errorTimestamp.toISOString(),
@@ -71,16 +76,15 @@ export async function getRecentDeploys(
       return [];
     }
 
-    // Normalise into a consistent shape for the scoring algorithm
     const deploys = commits.map((commit) => ({
       sha: commit.sha,
       shortSha: commit.sha.slice(0, 7),
       author: commit.commit?.author?.name ?? commit.author?.login ?? "unknown",
       authorUsername: commit.author?.login ?? "unknown",
-      message: commit.commit?.message?.split("\n")[0] ?? "", // first line only
+      message: commit.commit?.message?.split("\n")[0] ?? "",
       timestamp: new Date(commit.commit?.author?.date),
       url: commit.html_url,
-      filesChanged: [], // populated lazily by getDeployDiff if needed
+      filesChanged: [],
     }));
 
     console.log(
@@ -89,13 +93,11 @@ export async function getRecentDeploys(
 
     return deploys;
   } catch (err) {
-    // 404 = repo not found or token has no access
     if (err.response?.status === 404) {
       throw new Error(
         `[github] Repo "${repo}" not found — check GITHUB_ACCESS_TOKEN has repo scope`
       );
     }
-    // 401 = bad token
     if (err.response?.status === 401) {
       throw new Error(
         "[github] GitHub token is invalid or expired — check GITHUB_ACCESS_TOKEN"
@@ -125,12 +127,8 @@ export async function getDeployDiff(repo, sha) {
     const commitData = response.data;
 
     const files = commitData.files ?? [];
-
-    // Extract just the filenames for overlap scoring
     const filenames = files.map((f) => f.filename).filter(Boolean);
 
-    // Build a truncated patch string — Gemini has a context limit
-    // Cap each file patch at 300 chars, total at 4000 chars
     const MAX_PATCH_PER_FILE = 300;
     const MAX_TOTAL_PATCH = 4000;
 
@@ -164,22 +162,16 @@ export async function getDeployDiff(repo, sha) {
  * resolveRepo
  * Maps a Sentry service/project slug to a GitHub "owner/repo" string.
  * Checks GITHUB_REPO env var first, then falls back to GITHUB_REPO_MAP
- * which is a JSON map of slug → repo for multi-service setups.
+ * for multi-service setups.
  *
  * @param {string} serviceName - Sentry project slug e.g. "rootsignal-api"
  * @returns {string|null}      - "owner/repo" or null if not found
- *
- * Example .env entries:
- *   GITHUB_REPO=acme/api-service                          (single repo)
- *   GITHUB_REPO_MAP={"rootsignal-api":"acme/api","web":"acme/web"}  (multi)
  */
 export function resolveRepo(serviceName) {
-  // Single-repo setup — one token maps to one repo
   if (process.env.GITHUB_REPO) {
     return process.env.GITHUB_REPO;
   }
 
-  // Multi-repo setup — JSON map of service slug → owner/repo
   if (process.env.GITHUB_REPO_MAP) {
     try {
       const map = JSON.parse(process.env.GITHUB_REPO_MAP);
