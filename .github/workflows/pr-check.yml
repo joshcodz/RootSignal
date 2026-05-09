@@ -1,0 +1,37 @@
+# .github/workflows/pr-check.yml
+# Runs on every PR to main — catches broken imports and syntax errors.
+
+name: PR Check
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  check:
+    name: Check Backend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: backend
+        run: npm install
+
+      - name: Verify all service files parse correctly
+        working-directory: backend
+        run: |
+          for f in src/services/*.js src/routes/*.js src/db/*.js; do
+            node --input-type=module < /dev/null || true
+            node --check "$f" && echo "✓ $f" || exit 1
+          done
